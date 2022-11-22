@@ -1,0 +1,291 @@
+---
+title: "HTE Analysis"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+## 0- Libraries
+```{r}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(sandwich)
+library(lmtest)
+library(stringr)
+
+library(margins)
+
+library(forcats)
+library(stringr)
+
+# plotting adjucnts
+library(dslabs)
+library(RColorBrewer)
+
+
+# set Rafa's theme
+ds_theme_set()
+```
+
+
+
+## 1- Data
+```{r}
+df <- read_csv('../data/COVID-PDSS_final-HTE.csv') %>%
+    mutate(risk_group = as.numeric(risk_group))
+```
+
+## 2- HTE
+
+### IPW Analysis
+#### Mean Standardized Difference Functions
+```{r}
+cont_sd <- function(df, tx, var) {
+    x <- df %>% 
+        select(!!tx, wa, !!var) %>%
+        drop_na() %>%
+        group_by(!!tx) %>% 
+        summarise(a_bar=mean(!!var), a_var=var(!!var)) %>%
+        mutate(numer = a_bar-lag(a_bar), denom=sqrt((a_var^2+lag(a_var)^2)/2)) %>%
+        mutate(d=100*numer/denom)
+    return(x$d[2])
+}
+
+w_cont_sd <- function(df, tx, var) {
+   x <- df %>% 
+        select(!!tx, wa, !!var) %>%
+        drop_na() %>%
+        group_by(!!tx) %>% 
+        summarise(n(), a_bar=weighted.mean(!!var, wa), a_var=modi::weighted.var(!!var, wa)) %>%
+        mutate(numer = a_bar-lag(a_bar), denom=sqrt((a_var^2+lag(a_var)^2)/2)) %>%
+        mutate(d=100*numer/denom)
+   return(x$d[2])
+}
+
+binom_sd <- function(df, tx, var) {
+    x <- df %>% 
+        select(!!tx, !!var) %>%
+        drop_na() %>%
+        group_by(!!tx) %>%
+        summarise(n(), p=mean(!!var)) %>%
+        mutate(p_var=p*(1-p)) %>%
+        mutate(numer=p-lag(p), denom=(sqrt((p_var+lag(p_var))/2))) %>%
+        mutate(d=numer/denom)
+    return(x$d[2])
+}
+
+w_binom_sd <- function(df, tx, var) {
+    x <- df %>% 
+        select(!!tx, wa, !!var) %>%
+        drop_na() %>%
+        mutate(wa2=wa^2) %>%
+        group_by(!!tx) %>%
+        summarise(n(), p=weighted.mean(!!var, wa), wa2sum=sum(wa2)) %>%
+        mutate(wp_var=wa2sum*(p*(1-p))) %>%
+        mutate(numer=p-lag(p), denom=(sqrt((wp_var+lag(wp_var))/2))) %>%
+        mutate(d=numer/denom)
+    return(x$d[2])
+}
+```
+
+### Primary Interaction Analysis
+Adjusting for co-morbidity, APACHE III, and admission respiratory severity.
+```{r}
+propensity_glm <- glm(early_steroids ~ mhcmdz + apacheIII + mod_sev_d0, 
+                      family=binomial(link='logit'), 
+                      data=df)
+
+summary(propensity_glm)
+
+prA1L <- predict(propensity_glm, df, type='response')
+prA0L <- 1 - prA1L
+
+df <- df %>% 
+  mutate(wa=ifelse(early_steroids == 1, 1/prA1L, 1/prA0L))
+```
+
+Compare balance before and after weighting.
+```{r}
+dft <- tribble(~feature, ~sd, ~wsd,
+        'APACHE III', cont_sd(df, quo(early_steroids), quo(apacheIII)), w_cont_sd(df, quo(early_steroids), quo(apacheIII)),
+        'Severe Disease', binom_sd(df, quo(early_steroids), quo(mod_sev_d0)), w_binom_sd(df, quo(early_steroids), quo(mod_sev_d0)),
+        'Co-morbidity', binom_sd(df, quo(early_steroids), quo(mhcmdz)), w_binom_sd(df, quo(early_steroids), quo(mhcmdz))
+) 
+
+varNames <- as.character(dft$feature)[order(dft$sd)]
+dft$feature <- factor(dft$feature, levels=varNames)
+
+
+dft %>%
+    rename(Unweighted=sd, Weighted=wsd) %>%
+    pivot_longer(data = ., cols = c('Unweighted', 'Weighted'), names_to='Method') %>%
+    arrange(desc(value)) %>%
+    ggplot(data=., aes(x=feature, y=value, group=Method, color=Method)) +
+    geom_line() +
+    geom_point() +
+    geom_hline(yintercept = 0.1, color = "black", size = 0.1) +
+    coord_flip() +
+    theme_bw() +
+    theme(legend.key = element_blank()) +
+    ylab('Standardized Mean Difference') + xlab('Feature')
+```
+
+Fit marginal structural model.
+```{r}
+msm_glm <- glm(mort90_cons ~ risk_pdss*early_steroids, weights=wa, 
+               family = binomial(link = 'logit'), data=df)
+
+summary(msm_glm)
+coeftest(msm_glm, vcov=sandwich) 
+```
+
+
+### Sensitivity Analysis for Interaction Model with More Covarites
+
+Fit weights with same covariates as well as demographic factors.
+```{r}
+propensity_glm <- glm(early_steroids ~ age + sex + race_BAA + 
+                        mhcmdz + apacheIII + mod_sev_d0, 
+                      family=binomial(link='logit'), 
+                      data=df)
+
+summary(propensity_glm)
+
+prA1L <- predict(propensity_glm, df, type='response')
+prA0L <- 1 - prA1L
+
+df <- df %>% 
+  mutate(wa=ifelse(early_steroids == 1, 1/prA1L, 1/prA0L))
+```
+
+Compare covariate balance before and after weighting.
+```{r}
+dft <- tribble(~feature, ~sd, ~wsd,
+        'Age', cont_sd(df, quo(early_steroids), quo(age)), w_cont_sd(df, quo(early_steroids), quo(age)),
+        'Male Sex', binom_sd(df, quo(early_steroids), quo(male_sex)), w_binom_sd(df, quo(early_steroids), quo(male_sex)),
+        'African American Race', binom_sd(df, quo(early_steroids), quo(race_BAA)), w_binom_sd(df, quo(early_steroids), quo(race_BAA)),
+        'APACHE III', cont_sd(df, quo(early_steroids), quo(apacheIII)), w_cont_sd(df, quo(early_steroids), quo(apacheIII)),
+        'Severe Disease', binom_sd(df, quo(early_steroids), quo(mod_sev_d0)), w_binom_sd(df, quo(early_steroids), quo(mod_sev_d0)),
+        'Co-morbidity', binom_sd(df, quo(early_steroids), quo(mhcmdz)), w_binom_sd(df, quo(early_steroids), quo(mhcmdz))
+) 
+
+varNames <- as.character(dft$feature)[order(abs(dft$sd))]
+dft$feature <- factor(dft$feature, levels=varNames)
+
+
+dft %>%
+    rename(Unweighted=sd, Weighted=wsd) %>%
+    pivot_longer(data = ., cols = c('Unweighted', 'Weighted'), names_to='Method') %>%
+    arrange(desc(value)) %>%
+    ggplot(data=., aes(x=feature, y=value, group=Method, color=Method)) +
+    geom_line() +
+    geom_point() +
+    geom_hline(yintercept = 0.1, color = "black", size = 0.1) +
+    coord_flip() +
+    theme_bw() +
+    theme(legend.key = element_blank()) +
+    ylab('Standardized Mean Difference') + xlab('Feature')
+```
+
+Fit marginal structural model.
+```{r}
+msm_glm <- glm(mort90_cons ~ risk_group*early_steroids, weights=wa, 
+               family=binomial(link='logit'), data=df)
+
+summary(msm_glm)
+coeftest(msm_glm, vcov=sandwich) 
+```
+
+Fit continuous version, same confounders, and use it to generate a mortality
+plot.
+```{r}
+propensity_glm <- glm(early_steroids ~ mhcmdz + apacheIII + mod_sev_d0, 
+                      family = binomial(link = 'logit'), 
+                      data = df)
+
+prA1L <- predict(propensity_glm, df, type = 'response')
+prA0L <- 1 - prA1L
+
+df <- df %>% 
+  mutate(wa = ifelse(early_steroids == 1, 1/prA1L, 1/prA0L))
+
+msm_glm <- glm(mort90_cons ~ early_steroids*risk_pdss, weights = wa, 
+               family = binomial(link = 'logit'), data = df)
+
+coeftest(msm_glm, vcov=sandwich) 
+
+res <- modmarg::marg(msm_glm, var_interest=c('risk_pdss'), type='levels',
+              at=list(risk_pdss=seq(0.01, 1.0, 0.05), early_steroids=c(0,1)),
+              vcov_mat=vcovHC(msm_glm, type = 'HC0'),
+              weights=msm_glm$prior.weights)
+
+bind_rows(res, .id = "column_label") %>%
+    mutate(risk_pdss=as.numeric(str_sub(column_label, 13,16)),
+           steroids=as.numeric(str_sub(column_label, 34,35))) %>%
+    select(risk_pdss, early_steroids=steroids,
+           fitted=Margin, se.fitted=Standard.Error) %>%
+    group_by(risk_pdss, early_steroids) %>% 
+    mutate(upper=fitted+se.fitted, lower=fitted-se.fitted, 
+           upper2=fitted+2*se.fitted, lower2=fitted-2*se.fitted) %>%
+    summarise(dfit=mean(fitted), ci_low=mean(lower), ci_high=mean(upper),
+              ci_low2=mean(lower2), ci_high2=mean(upper2)) %>%
+    ggplot(aes(x=risk_pdss, y=dfit, color=as_factor(early_steroids))) +
+    geom_smooth(se=FALSE) + 
+    geom_ribbon(aes(ymin=ci_low, ymax=ci_high, fill=as_factor(early_steroids)), alpha=0.2) +
+    geom_ribbon(aes(ymin=ci_low2, ymax=ci_high2, fill=as_factor(early_steroids)), alpha=0.025, linetype=2) +
+    ylab('Average Risk of Mortality at 90 Days') + 
+    xlab('Predicted Risk of Severe Disease') +
+    scale_fill_brewer(palette='Set1', labels=c('Not Given', 'Given')) +
+    scale_colour_brewer(palette='Set1', labels=c('Not Given', 'Given')) +
+    guides(color=guide_legend(title='Corticosteroids', values=c(0,1), labels=c('Not Given', 'Given')), 
+           fill=guide_legend(title='Corticosteroids'), values=c(0,1), labels=c('Not Given', 'Given'))
+
+```
+
+
+### Sensitivity Anlysis for Interaction Model Using Severity for Interaction
+#### APACHE III, continuous
+```{r}
+propensity_glm <- glm(early_steroids ~ mhcmdz + mod_sev_d0, 
+                      family = binomial(link = 'logit'), 
+                      data = df)
+
+
+prA1L <- predict(propensity_glm, df, type = 'response')
+prA0L <- 1 - prA1L
+
+df <- df %>% 
+  mutate(wa = ifelse(early_steroids == 1, 1/prA1L, 1/prA0L))
+
+msm_glm <- glm(mort90_cons ~ early_steroids*apacheIII, weights = wa, 
+               family = binomial(link = 'logit'), data = df)
+
+coeftest(msm_glm, vcov=sandwich) 
+```
+
+#### APACHE III, tertiles
+```{r}
+df$apache_tert <- with(df, cut(apacheIII, 
+                                breaks = quantile(apacheIII, 
+                                                  probs = seq(0,1, by = (1/3)), 
+                                                  na.rm=TRUE), 
+                                include.lowest = TRUE))
+
+propensity_glm <- glm(early_steroids ~ mhcmdz + mod_sev_d0, 
+                      family = binomial(link = 'logit'), 
+                      data = df)
+
+prA1L <- predict(propensity_glm, df, type = 'response')
+prA0L <- 1 - prA1L
+
+df <- df %>% 
+  mutate(wa = ifelse(early_steroids == 1, 1/prA1L, 1/prA0L))
+
+msm_glm <- glm(mort90_cons ~ early_steroids*apache_tert, weights = wa, 
+               family = binomial(link = 'logit'), data = df)
+
+coeftest(msm_glm, vcov=sandwich) 
+```
