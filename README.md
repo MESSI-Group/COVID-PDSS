@@ -1,5 +1,4 @@
 ## Identifying a Proteomic Signature of Severe COVID-19
-### Code by C.V. Cosgriff, MD, MPH
 
 **Full publication:** **Link pending**
 
