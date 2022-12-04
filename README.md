@@ -1,6 +1,6 @@
 ## Identifying a Proteomic Signature of Severe COVID-19
 
-**Full publication:** **Link pending**
+**Full publication:** https://journals.lww.com/ccejournal/Fulltext/2022/12000/Validating_a_Proteomic_Signature_of_Severe.6.aspx
 
 *Background:* COVID-19 is a heterogenous disease. Biomarker based approaches may identify patients at risk for severe disease, who may be more likely to benefit from specific therapies.
 
